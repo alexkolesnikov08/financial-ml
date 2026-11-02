@@ -71,6 +71,44 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
     train_prices = train_df["close"].values
     hold_prices = hold_df["close"].values
 
+    # Стратегические маски/параметры для backtest.
+    time_mask = None
+    try:
+        _tf = getattr(config, "TIME_FILTERS", None)
+        if isinstance(_tf, dict):
+            time_mask = BT.make_time_mask(hold_df, **_tf)
+        else:
+            time_mask = BT.make_time_mask(hold_df)
+        if time_mask is not None:
+            time_mask = np.asarray(time_mask, dtype=bool)
+    except Exception as e:
+        print(f"[time_mask] FAILED {e}")
+        time_mask = None
+
+    trend_mask = None
+    try:
+        if "ema_50" in hold_df.columns:
+            _tm = hold_df["close"] > hold_df["ema_50"]
+            if "ema_20" in hold_df.columns:
+                _tm = _tm | (hold_df["ema_20"] > hold_df["ema_50"])
+            trend_mask = np.asarray(_tm.fillna(False), dtype=bool)
+        elif "sma_50" in hold_df.columns:
+            _tm = hold_df["close"] > hold_df["sma_50"]
+            trend_mask = np.asarray(_tm.fillna(False), dtype=bool)
+    except Exception:
+        trend_mask = None
+
+    atr_arr = None
+    if "atr_14" in hold_df.columns:
+        atr_arr = np.asarray(hold_df["atr_14"].values, dtype=float)
+
+    thr_hi = getattr(config, "THR_HI", None)
+    thr_lo = getattr(config, "THR_LO", None)
+    min_hold = getattr(config, "MIN_HOLD", 0)
+    cooldown = getattr(config, "COOLDOWN", 0)
+    trail_mult = getattr(config, "TRAIL_MULT", None)
+    use_consensus = bool(getattr(config, "USE_CONSENSUS", False))
+
     Xtr, ytr, cols = split_xy(train_df)
     Xho, yho, _ = split_xy(hold_df)
 
@@ -179,21 +217,53 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
         except Exception as e:
             print(f"[stack hold] {mname}: FAILED {e}")
 
+    # Матрица консенсуса из base_hold_proba.
+    consensus_matrix = None
+    if use_consensus:
+        try:
+            consensus_matrix = np.column_stack(
+                [np.asarray(base_hold_proba[n], dtype=float) for n in base_hold_proba]
+            )
+        except Exception as e:
+            print(f"[consensus] FAILED {e}")
+            consensus_matrix = None
+
+    def _sim_kwargs():
+        kw = {
+            "thr_lo": thr_lo,
+            "time_mask": time_mask,
+            "trend_mask": trend_mask,
+            "atr": atr_arr,
+            "trail_mult": trail_mult,
+            "min_hold": min_hold,
+            "cooldown": cooldown,
+        }
+        if use_consensus and consensus_matrix is not None:
+            kw["consensus_signals"] = consensus_matrix
+            kw["min_consensus"] = 2
+        return kw
+
     # 9. Симуляция для базовых.
     results = {}
     base_rows = []
     for name in zoo.keys():
         proba = base_hold_proba[name]
-        thr = base_thresholds.get(name, 0.5)
-        sim = BT.simulate(hold_prices, proba, thr)
+        if thr_hi is None:
+            thr = base_thresholds.get(name, 0.5)
+        else:
+            thr = thr_hi
+        sim = BT.simulate(hold_prices, proba, thr, **_sim_kwargs())
         results[name] = sim
         base_rows.append(EV.summarize_holdout(sim, name))
 
     # Ансамбли.
     ens_rows = []
     for name, proba in ens_hold_probas.items():
-        thr = ens_thresholds.get(name, 0.5)
-        sim = BT.simulate(hold_prices, proba, thr)
+        if thr_hi is None:
+            thr = ens_thresholds.get(name, 0.5)
+        else:
+            thr = thr_hi
+        sim = BT.simulate(hold_prices, proba, thr, **_sim_kwargs())
         results[name] = sim
         ens_rows.append(EV.summarize_holdout(sim, name))
 
@@ -221,6 +291,15 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
     ])], ignore_index=True)
 
     # Сохранение артефактов (joblib).
+    strategic = {
+        "THR_HI": getattr(config, "THR_HI", None),
+        "THR_LO": getattr(config, "THR_LO", None),
+        "MIN_HOLD": getattr(config, "MIN_HOLD", None),
+        "COOLDOWN": getattr(config, "COOLDOWN", None),
+        "TRAIL_MULT": getattr(config, "TRAIL_MULT", None),
+        "TIME_FILTERS": getattr(config, "TIME_FILTERS", None),
+        "USE_CONSENSUS": getattr(config, "USE_CONSENSUS", None),
+    }
     try:
         PERSIST.save_models(
             holdout["name"],
@@ -231,6 +310,11 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
             train_prices=train_prices,
             feature_columns=cols,
             tuned=tuned,
+            extra={
+                **strategic,
+                "strategic_params": strategic,
+                "strategic": strategic,
+            },
         )
     except Exception as e:
         print(f"[persist] FAILED {e}")

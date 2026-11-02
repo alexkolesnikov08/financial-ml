@@ -9,3 +9,4 @@ catboost>=1.2
 matplotlib>=3.8
 tqdm>=4.66
 scipy>=1.11
+optuna>=3.5

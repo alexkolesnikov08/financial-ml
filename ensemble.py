@@ -58,8 +58,13 @@ def rank_avg(probas: dict) -> np.ndarray:
 
 def hard_vote(probas: dict) -> np.ndarray:
     M_ = _stack(probas)
-    bins = (M_ >= 0.5).astype(int)
-    return bins.mean(axis=1)
+    # NaN -> NaN (не считаем как класс 0)
+    out = np.full(M_.shape[0], np.nan, dtype=float)
+    finite_rows = np.all(np.isfinite(M_), axis=1)
+    if finite_rows.any():
+        bins = (M_[finite_rows] >= 0.5).astype(int)
+        out[finite_rows] = bins.mean(axis=1)
+    return out
 
 
 VOTING_METHODS = {

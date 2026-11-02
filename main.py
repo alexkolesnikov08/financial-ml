@@ -27,7 +27,11 @@ def main():
     print(f"Данные: {df.shape}, {df.index.min()} .. {df.index.max()}")
 
     # 2. Фичи
-    feat_df = F.build(df)
+    if getattr(config, "USE_CROSS_ASSETS", False):
+        cross_assets = D.load_cross_assets()
+        feat_df = F.build(df, cross_assets=cross_assets)
+    else:
+        feat_df = F.build(df)
     print(f"После фичей: {feat_df.shape}")
 
     # 3. Пайплайн

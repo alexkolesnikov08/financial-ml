@@ -118,6 +118,52 @@ def ensure_min_history(df: pd.DataFrame, min_bars: int = 500) -> pd.DataFrame:
     return df
 
 
+def _load_one_cross(ticker: str,
+                    interval: str,
+                    period: str) -> pd.DataFrame:
+    cache = config.DATA_DIR / f"{ticker}_{interval}.parquet"
+    if cache.exists():
+        try:
+            df = pd.read_parquet(cache)
+            if len(df) >= 200:
+                return df
+        except Exception:
+            pass
+    try:
+        df = download(ticker, interval, period)
+        df = clean(df)
+    except Exception as e:
+        if interval != config.FALLBACK_INTERVAL:
+            print(f"[data] {ticker} {interval} не удался ({e}), пробую {config.FALLBACK_INTERVAL}")
+            return _load_one_cross(ticker, config.FALLBACK_INTERVAL, period)
+        raise
+    if len(df) < 200 and interval != config.FALLBACK_INTERVAL:
+        print(f"[data] {ticker} {interval}: мало строк ({len(df)}), fallback на {config.FALLBACK_INTERVAL}")
+        return _load_one_cross(ticker, config.FALLBACK_INTERVAL, period)
+    df.to_parquet(cache)
+    return df
+
+
+def load_cross_assets(interval: str | None = None,
+                      period: str | None = None) -> dict:
+    """Загрузить кросс-активы (SPY, QQQ, ^VIX и др.) из config.CROSS_ASSETS.
+
+    Возвращает dict ticker -> DataFrame (UTC DatetimeIndex, очищенный).
+    Кэш parquet per ticker/interval. Скачивание через HTTP-session (yfinance).
+    """
+    if interval is None:
+        interval = config.PREFERRED_INTERVAL
+    if period is None:
+        period = config.DOWNLOAD_PERIOD
+    out = {}
+    for ticker in getattr(config, "CROSS_ASSETS", []):
+        try:
+            out[ticker] = _load_one_cross(ticker, interval, period)
+        except Exception as e:
+            print(f"[data] не удалось загрузить {ticker}: {e}")
+    return out
+
+
 if __name__ == "__main__":
     df = load_or_download()
     df = clean(df)

@@ -36,7 +36,7 @@ def _atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
     return tr.rolling(window=window, min_periods=window).mean()
 
 
-def build(df: pd.DataFrame) -> pd.DataFrame:
+def build(df: pd.DataFrame, cross_assets: dict | None = None) -> pd.DataFrame:
     """Построить фичи + цель. Возвращает DataFrame с фичами и колонкой y."""
     df = df.copy()
 
@@ -53,6 +53,29 @@ def build(df: pd.DataFrame) -> pd.DataFrame:
     if "date" not in df.columns:
         local = df.index.tz_convert(config.TZ)
         df["date"] = local.date
+
+    # Cross-asset: выравнивание строго backward (timestamp актива <= t).
+    if cross_assets:
+        for ticker, adf in cross_assets.items():
+            if adf is None or (hasattr(adf, "empty") and adf.empty):
+                continue
+            a = adf.copy()
+            if not isinstance(a.index, pd.DatetimeIndex):
+                try:
+                    a.index = pd.to_datetime(a.index, utc=True)
+                except Exception:
+                    continue
+            if a.index.tz is None:
+                a.index = a.index.tz_localize("UTC")
+            else:
+                a.index = a.index.tz_convert("UTC")
+            a = a.sort_index()
+            if "close" not in a.columns:
+                continue
+            prefix = ticker.lower().replace("^", "").strip()
+            right = a[["close"]].rename(columns={"close": f"{prefix}_close"})
+            df = pd.merge_asof(df, right, left_index=True, right_index=True,
+                               direction="backward", tolerance=pd.Timedelta(minutes=60))
 
     close = df["close"]
     open_ = df["open"]
@@ -168,10 +191,36 @@ def build(df: pd.DataFrame) -> pd.DataFrame:
         return float(s.autocorr(lag=1))
     df["autocorr_ret_1_10"] = df["ret_1"].rolling(10, min_periods=10).apply(_autocorr, raw=False)
     df["skew_20"] = df["ret_1"].rolling(20, min_periods=20).skew()
+    df["kurt_20"] = df["ret_1"].rolling(20, min_periods=20).kurt()
+
+    # RSI-14
+    _delta = close.diff()
+    _gain = _delta.clip(lower=0)
+    _loss = (-_delta).clip(lower=0)
+    _avg_gain = _gain.rolling(14, min_periods=14).mean()
+    _avg_loss = _loss.rolling(14, min_periods=14).mean()
+    _rs = _avg_gain / _avg_loss.replace(0, np.nan)
+    df["rsi_14"] = 100.0 - 100.0 / (1.0 + _rs)
+
+    # MACD
+    _ema12 = _ema(close, 12)
+    _ema26 = _ema(close, 26)
+    df["macd"] = _ema12 - _ema26
+    df["macd_signal"] = _ema(df["macd"], 9)
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
+
+    # Bollinger Bands
+    _sma20 = _sma(close, 20)
+    _std20 = _std(close, 20)
+    df["bb_width_20"] = (4.0 * _std20) / _sma20.replace(0, np.nan)
+    df["bb_position_20"] = (close - (_sma20 - 2.0 * _std20)) / (4.0 * _std20).replace(0, np.nan)
+
+    df["atr_trend_5"] = df["atr_14"].diff(5)
 
     # Interaction
     df["ret_1_x_rel_volume"] = df["ret_1"] * df["rel_volume"]
     df["body_x_range"] = df["body"] * df["range_pct"]
+    df["zscore_20_x_atr"] = df["zscore_20"] * df["atr_14"]
 
     # Время как категориальные/циклические.
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24.0)
@@ -179,11 +228,62 @@ def build(df: pd.DataFrame) -> pd.DataFrame:
     df["dow_sin"] = np.sin(2 * np.pi * df["dayofweek"] / 7.0)
     df["dow_cos"] = np.cos(2 * np.pi * df["dayofweek"] / 7.0)
 
+    # Cross-asset фичи (если данные переданы) — обобщённо для любых *_close.
+    cross_cols = [c for c in df.columns if c.endswith("_close")]
+    if cross_cols:
+        aapl_ret_1 = df["close"].pct_change()
+        aapl_ret_5 = df["close"].pct_change(5)
+        # Первый кросс-актив используем для rel_strength (как раньше spy).
+        first = cross_cols[0]
+        first_prefix = first[:-6]  # strip "_close"
+        for c in cross_cols:
+            prefix = c[:-6]
+            df[f"{prefix}_ret_1"] = df[c].pct_change()
+            # Для VIX используем diff уровня вместо pct_change? Оставляем pct_change унифицированно.
+            df[f"{prefix}_corr_20"] = aapl_ret_1.rolling(20, min_periods=20).corr(df[c].pct_change())
+        # rel_strength для первого актива
+        df["rel_strength_5"] = aapl_ret_5 - df[first].pct_change(5)
+        # Алиасы для обратной совместимости (spy/qqq/vix)
+        if "spy_close" in cross_cols:
+            df["spy_ret_1"] = df["spy_close"].pct_change() if "spy_ret_1" not in df.columns else df["spy_ret_1"]
+        if "qqq_close" in cross_cols:
+            df["qqq_ret_1"] = df["qqq_close"].pct_change() if "qqq_ret_1" not in df.columns else df["qqq_ret_1"]
+        if "vix_close" in cross_cols:
+            df["vix_change_1"] = df["vix_close"].diff()
+            df["corr_aapl_spy_20"] = df.get("spy_corr_20", df.get("corr_aapl_spy_20"))
+        # Убираем вспомогательные close кросс-активов.
+        df = df.drop(columns=cross_cols)
+
     # Цель: close_{t+1} > close_t. shift(-1) только для цели, не для фичей.
     future = close.shift(-config.HORIZON)
     tgt = (future > close).astype(float)
     tgt[future.isna()] = np.nan
     df[config.TARGET_COL] = tgt
+
+    # Target encoding (time-aware): expanding mean с байесовским сглаживанием (alpha).
+    # Строго по прошлому: используем target.shift(1).
+    _te_alpha = 10.0
+    _past_y = df[config.TARGET_COL].shift(1)
+    _global_mean = _past_y.expanding(min_periods=1).mean()
+
+    def _te_expand(cat: pd.Series) -> pd.Series:
+        grp = cat.astype(str)
+        _sum = _past_y.groupby(grp).expanding(min_periods=1).sum().reset_index(level=0, drop=True)
+        _cnt = _past_y.groupby(grp).expanding(min_periods=1).count().reset_index(level=0, drop=True)
+        return (_sum + _te_alpha * _global_mean) / (_cnt + _te_alpha)
+
+    _te_hour = _te_expand(df["hour"])
+    df["te_hour"] = _te_hour
+    df["hour_te"] = _te_hour
+
+    _te_dow = _te_expand(df["dayofweek"])
+    df["te_dayofweek"] = _te_dow
+    df["dow_te"] = _te_dow
+
+    _te_combo_cat = df["hour"].astype(str) + "_" + df["dayofweek"].astype(str)
+    _te_combo = _te_expand(_te_combo_cat)
+    df["te_hour_dow"] = _te_combo
+    df["hour_dow_te"] = _te_combo
 
     # Удаляем мультиколлинеарные дубли (оставляем ema/zscore/rel_volume/циклические).
     drop_cols = [c for c in df.columns if c.startswith("sma_") or c.startswith("dist_sma_")]

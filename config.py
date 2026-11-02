@@ -64,6 +64,11 @@ N_TUNING_ITER = 12  # число случайных конфигов на мод
 # Метрика тюнинга: "neg_log_loss" | "roc_auc" | "bot_pnl"
 TUNE_METRIC = "neg_log_loss"
 
+# ---------------- Optuna ----------------
+USE_OPTUNA = True
+OPTUNA_N_TRIALS = 20
+OPTUNA_TIMEOUT = None
+OPTUNA_PRUNER = "median"
 # ---------------- Калибровка ----------------
 CALIBRATION_METHODS = ("sigmoid", "isotonic", "temperature", "beta")
 
@@ -78,8 +83,13 @@ MIN_HOLD = 3
 COOLDOWN = 2
 TRAIL_MULT = 1.5
 TIME_FILTERS = None
-
+# Консенсус базовых моделей при входе (опционально).
+USE_CONSENSUS = False
 # ---------------- Воспроизводимость ----------------
 N_JOBS = -1
+
+# ---------------- Cross-asset ----------------
+CROSS_ASSETS = ['SPY', 'QQQ', '^VIX']
+USE_CROSS_ASSETS = True
 """ 
 """
