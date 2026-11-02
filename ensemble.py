@@ -171,6 +171,37 @@ def cv_predict_stacker(meta_spec: dict, params: dict, oof_dict: dict, y,
             continue
     return oof_pred
 
+def diversity_prune(oof_dict: dict, corr_threshold: float = 0.95) -> list[str]:
+    """Удалить модели с корреляцией OOF > corr_threshold. Возвращает список имён-к-оставлению."""
+    names = list(oof_dict.keys())
+    if len(names) <= 1:
+        return list(names)
+    common = np.all(np.column_stack([np.isfinite(oof_dict[n]) for n in names]), axis=1)
+    if int(common.sum()) < 10:
+        return list(names)
+    M_ = np.column_stack([oof_dict[n][common] for n in names])
+    try:
+        corr = np.corrcoef(M_, rowvar=False)
+    except Exception:
+        return list(names)
+    if np.ndim(corr) == 0:
+        return list(names)
+    keep = []
+    keep_idx = []
+    for i, n in enumerate(names):
+        ok = True
+        for j in keep_idx:
+            if abs(corr[i, j]) > corr_threshold:
+                ok = False
+                break
+        if ok:
+            keep.append(n)
+            keep_idx.append(i)
+    if not keep:
+        keep = [names[0]]
+    return keep
+
+
 def predict_stacker(stacker: dict, probas_holdout: dict) -> np.ndarray:
     """Предсказать вероятности на hold-out по базовым proba."""
     names = stacker["base_names"]

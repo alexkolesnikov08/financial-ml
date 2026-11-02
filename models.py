@@ -9,12 +9,19 @@ from __future__ import annotations
 
 import warnings
 
-from sklearn.ensemble import (ExtraTreesClassifier, HistGradientBoostingClassifier,
-                              RandomForestClassifier)
+from sklearn.ensemble import (AdaBoostClassifier, ExtraTreesClassifier,
+                              HistGradientBoostingClassifier, RandomForestClassifier)
 from sklearn.linear_model import (LogisticRegression, RidgeClassifier,
                                   SGDClassifier)
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.naive_bayes import GaussianNB, BernoulliNB
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.dummy import DummyClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, Binarizer
 
 import config
 
@@ -173,6 +180,56 @@ def make_zoo() -> dict:
                      "l2_leaf_reg": [1.0, 3.0, 10.0]},
         }
 
+    # --- GaussianNB ---
+    zoo["gaussian_nb"] = {
+        "factory": lambda p: GaussianNB(var_smoothing=p.get("var_smoothing", 1e-9)),
+        "grid": {"var_smoothing": [1e-9, 1e-8, 1e-7, 1e-6]},
+    }
+    # --- BernoulliNB (через Binarizer) ---
+    zoo["bernoulli_nb"] = {
+        "factory": lambda p: Pipeline([
+            ("binarizer", Binarizer(threshold=p.get("bin_threshold", 0.0))),
+            ("nb", BernoulliNB(alpha=p.get("alpha", 1.0))),
+        ]),
+        "grid": {"alpha": [0.1, 0.5, 1.0, 5.0, 10.0]},
+    }
+    # --- LinearDiscriminantAnalysis ---
+    zoo["lda"] = {
+        "factory": lambda p: LinearDiscriminantAnalysis(
+            solver=p.get("solver", "svd"),
+            shrinkage=p.get("shrinkage", None)),
+        "grid": {"solver": ["svd", "lsqr"]},
+    }
+    # --- AdaBoost (base DecisionTree depth=2) ---
+    zoo["ada_boost"] = {
+        "factory": lambda p: AdaBoostClassifier(
+            estimator=DecisionTreeClassifier(max_depth=2,
+                                             random_state=config.RANDOM_STATE),
+            n_estimators=p.get("n_estimators", 100),
+            learning_rate=p.get("learning_rate", 1.0),
+            random_state=config.RANDOM_STATE),
+        "grid": {"n_estimators": [50, 100, 200],
+                 "learning_rate": [0.5, 1.0]},
+    }
+    # --- KNN (через StandardScaler) ---
+    zoo["knn"] = {
+        "factory": lambda p: Pipeline([
+            ("scaler", StandardScaler()),
+            ("knn", KNeighborsClassifier(
+                n_neighbors=p.get("n_neighbors", 5),
+                weights=p.get("weights", "uniform"))),
+        ]),
+        "grid": {"n_neighbors": [3, 5, 7, 11],
+                 "weights": ["uniform", "distance"]},
+    }
+    # --- Dummy baseline ---
+    zoo["dummy"] = {
+        "factory": lambda p: DummyClassifier(
+            strategy=p.get("strategy", "stratified"),
+            random_state=config.RANDOM_STATE),
+        "grid": {"strategy": ["stratified", "most_frequent", "prior"]},
+    }
+
     return zoo
 
 
@@ -227,5 +284,14 @@ def meta_zoo() -> dict:
             n_estimators=200, max_depth=4, min_samples_leaf=20,
             random_state=config.RANDOM_STATE, n_jobs=config.N_JOBS),
         "grid": {},
+    }
+    mz["meta_gaussian_nb"] = {
+        "factory": lambda p: GaussianNB(var_smoothing=p.get("var_smoothing", 1e-9)),
+        "grid": {"var_smoothing": [1e-9, 1e-7]},
+    }
+    mz["meta_lda"] = {
+        "factory": lambda p: LinearDiscriminantAnalysis(
+            solver=p.get("solver", "svd")),
+        "grid": {"solver": ["svd", "lsqr"]},
     }
     return mz

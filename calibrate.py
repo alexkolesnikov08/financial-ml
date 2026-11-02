@@ -34,10 +34,37 @@ class CalibratedWrapper:
     def fit(self, X_calib, y_calib):
         scores = self._base_score(X_calib)
         y = np.asarray(y_calib).astype(int)
+        # Guard: одноклассовая калибровочная выборка — калибровка невозможна.
+        if len(np.unique(y)) < 2:
+            self.calibrator = ("none", None)
+            return self
         if self.method == "isotonic":
             iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
             iso.fit(scores, y)
             self.calibrator = ("iso", iso)
+        elif self.method == "temperature":
+            from scipy.optimize import minimize_scalar
+            from sklearn.metrics import log_loss as _ll
+            def _nll(T):
+                T = float(max(T, 1e-3))
+                scaled = 1.0 / (1.0 + np.exp(-np.log(np.clip(scores, 1e-6, 1 - 1e-6)
+                                                     / np.clip(1 - scores, 1e-6, 1 - 1e-6)) / T))
+                try:
+                    return float(_ll(y, np.clip(scaled, 1e-6, 1 - 1e-6), labels=[0, 1]))
+                except Exception:
+                    return 1e6
+            res = minimize_scalar(_nll, bounds=(0.1, 10.0), method="bounded",
+                                  options={"xatol": 1e-4})
+            T = float(res.x) if np.isfinite(res.x) else 1.0
+            self.calibrator = ("temp", T)
+        elif self.method == "beta":
+            eps = 1e-6
+            logp = np.log(np.clip(scores, eps, 1 - eps))
+            log1p = np.log(np.clip(1.0 - scores, eps, 1 - eps))
+            Xf = np.column_stack([logp, log1p])
+            lr = LogisticRegression(C=1e6, solver="lbfgs", max_iter=1000)
+            lr.fit(Xf, y)
+            self.calibrator = ("beta", lr)
         else:
             lr = LogisticRegression(C=1e6, solver="lbfgs", max_iter=1000)
             lr.fit(scores.reshape(-1, 1), y)
@@ -48,8 +75,23 @@ class CalibratedWrapper:
         if self.calibrator is None:
             raise RuntimeError("Калибратор не обучен: вызовите fit()")
         scores = self._base_score(X)
-        if self.calibrator[0] == "iso":
+        kind = self.calibrator[0]
+        if kind == "none":
+            p = np.asarray(scores, dtype=float)
+            p = np.clip(p, 1e-6, 1 - 1e-6)
+            return np.column_stack([1 - p, p])
+        if kind == "iso":
             p = self.calibrator[1].transform(scores)
+        elif kind == "temp":
+            T = float(self.calibrator[1])
+            logit = np.log(np.clip(scores, 1e-6, 1 - 1e-6) / np.clip(1 - scores, 1e-6, 1 - 1e-6))
+            p = 1.0 / (1.0 + np.exp(-logit / T))
+        elif kind == "beta":
+            eps = 1e-6
+            logp = np.log(np.clip(scores, eps, 1 - eps))
+            log1p = np.log(np.clip(1.0 - scores, eps, 1 - eps))
+            Xf = np.column_stack([logp, log1p])
+            p = self.calibrator[1].predict_proba(Xf)[:, 1]
         else:
             p = self.calibrator[1].predict_proba(scores.reshape(-1, 1))[:, 1]
         p = np.clip(p, 1e-6, 1 - 1e-6)

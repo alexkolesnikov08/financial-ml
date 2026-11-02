@@ -65,11 +65,19 @@ N_TUNING_ITER = 12  # число случайных конфигов на мод
 TUNE_METRIC = "neg_log_loss"
 
 # ---------------- Калибровка ----------------
-CALIBRATION_METHODS = ("sigmoid", "isotonic")
+CALIBRATION_METHODS = ("sigmoid", "isotonic", "temperature", "beta")
 
 # ---------------- Порог ----------------
 # Пороги перебираем на валидационных OOF (только train+val).
 THRESHOLD_GRID = [i / 1000 for i in range(400, 601)]  # 0.40..0.60
+
+# ---------------- Стратегия (v1.1) ----------------
+THR_HI = 0.55
+THR_LO = 0.45
+MIN_HOLD = 3
+COOLDOWN = 2
+TRAIL_MULT = 1.5
+TIME_FILTERS = None
 
 # ---------------- Воспроизводимость ----------------
 N_JOBS = -1

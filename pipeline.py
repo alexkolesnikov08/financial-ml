@@ -19,21 +19,45 @@ import ensemble as ENS
 import backtest as BT
 import eval as EV
 from features import split_xy
+import persist as PERSIST
 
 
-def _optimize_threshold(prices, signals, grid=config.THRESHOLD_GRID):
+def save_models(*args, **kwargs):
+    """Обёртка над persist.save_models (для совместимости)."""
+    return PERSIST.save_models(*args, **kwargs)
+
+
+def _optimize_threshold(prices, signals, grid=config.THRESHOLD_GRID, min_trades: int = 5):
     prices = np.asarray(prices, dtype=float)
     signals = np.asarray(signals, dtype=float)
     best_thr = 0.5
     best_eq = -np.inf
+    best_key = None
+    candidates = []
     for thr in grid:
         try:
             res = BT.simulate(prices, signals, float(thr))
         except Exception:
             continue
-        if res["final_equity"] > best_eq:
-            best_eq = res["final_equity"]
+        nt = int(res.get("num_trades", 0) or 0)
+        pf = res.get("profit_factor", None)
+        pf = float(pf) if pf is not None and np.isfinite(pf) else 0.0
+        candidates.append((float(thr), res, nt, pf))
+        if nt < int(min_trades):
+            continue
+        # метрика с учётом числа сделок: final_equity, затем nt, затем profit_factor
+        key = (float(res["final_equity"]), nt, pf)
+        if best_key is None or key > best_key:
+            best_key = key
             best_thr = float(thr)
+            best_eq = float(res["final_equity"])
+    # Fallback: если ни один порог не дал min_trades сделок — берём лучший по (nt, final_equity).
+    if best_key is None and candidates:
+        fb = max(candidates, key=lambda c: (c[2], c[1]["final_equity"]))
+        best_thr = fb[0]
+        best_eq = float(fb[1]["final_equity"])
+    if not np.isfinite(best_eq):
+        best_eq = float(config.START_CAPITAL)
     return best_thr, float(best_eq)
 
 
@@ -89,6 +113,7 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
 
     # 6. Веса для weighted soft из OOF.
     weights = ENS.make_weights_from_oof(oof_dict, ytr)
+    stackers = {}
 
     # 7. Ансамбли на OOF -> пороги (на полных массивах).
     ens_oof_probas = {}
@@ -138,7 +163,6 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
     ens_hold_probas["ens_hard_vote"] = ENS.hard_vote(base_hold_proba)
 
     # stackers для hold-out (обучаем на finite OOF)
-    stackers = {}
     if oof_dict and all_finite_mask.sum() >= 20:
         finite_oof = {k: v[all_finite_mask] for k, v in oof_dict.items()}
         y_finite = pd.Series((ytr.values if hasattr(ytr, "values") else np.asarray(ytr))[all_finite_mask])
@@ -196,6 +220,21 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
          "exposure": 0.0, "avg_trade": 0.0},
     ])], ignore_index=True)
 
+    # Сохранение артефактов (joblib).
+    try:
+        PERSIST.save_models(
+            holdout["name"],
+            final_base=final_base,
+            stackers=stackers,
+            oof=oof_dict,
+            thresholds={**base_thresholds, **ens_thresholds},
+            train_prices=train_prices,
+            feature_columns=cols,
+            tuned=tuned,
+        )
+    except Exception as e:
+        print(f"[persist] FAILED {e}")
+
     return {
         "holdout": holdout["name"],
         "holdout_start": str(holdout["holdout_start"]),
@@ -207,6 +246,7 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
         "tuned": tuned,
         "oof": oof_dict,
         "train_prices": train_prices,
+        "feature_columns": cols,
     }
 
 
