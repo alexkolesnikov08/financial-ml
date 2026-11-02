@@ -20,7 +20,8 @@ import config
 def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=None,
              regime_mask=None, atr=None, trend_mask=None, min_hold=0, cooldown=0,
              trail_mult=None, consensus_signals=None, min_consensus=None,
-             edge_mu_win=None, edge_mu_loss=None) -> dict:
+             edge_mu_win=None, edge_mu_loss=None, edge_threshold=None,
+              confidence_threshold=None, short=False) -> dict:
     """Симулировать long-only стратегию.
 
     prices: array-like цен закрытия (длина n).
@@ -41,6 +42,12 @@ def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=Non
     trend_mask = None if trend_mask is None else np.asarray(trend_mask, dtype=bool)
     atr = None if atr is None else np.asarray(atr, dtype=float)
     consensus = None if consensus_signals is None else np.asarray(consensus_signals)
+
+    short = bool(short)
+    edge_threshold = 0.0 if edge_threshold is None else float(edge_threshold)
+    # None = без confidence-фильтра (пайплайн передаёт порог явно).
+    if confidence_threshold is not None:
+        confidence_threshold = float(confidence_threshold)
 
     # Проверки длин масок/ATR/consensus.
     if time_mask is not None and time_mask.shape[0] != n:
@@ -70,6 +77,8 @@ def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=Non
     last_exit_i = None
     entry_i = None
     peak_price = None
+    trough_price = None
+    is_short = False
     last_valid_price = None
     prev_equity = float(config.START_CAPITAL)
 
@@ -80,7 +89,7 @@ def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=Non
         if np.isfinite(price) and price > 0:
             last_valid_price = price
         if not np.isfinite(price) or price <= 0:
-            positions[i] = 1 if in_pos else 0
+            positions[i] = (-1 if (in_pos and is_short) else (1 if in_pos else 0))
             if in_pos:
                 if last_valid_price is not None and np.isfinite(last_valid_price):
                     mtm = cash + shares * last_valid_price
@@ -95,29 +104,42 @@ def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=Non
             continue
 
         if in_pos:
-            if peak_price is None or price > peak_price:
-                peak_price = price
+            if is_short:
+                if trough_price is None or price < trough_price:
+                    trough_price = price
+            else:
+                if peak_price is None or price > peak_price:
+                    peak_price = price
 
         # Решение на основе signal[i-1] (signal_t -> вход t+1).
         sig = signals[i - 1] if (i > 0 and i - 1 < len(signals)) else np.nan
+        desired_dir = 0
         if i > 0 and np.isfinite(sig):
             if in_pos:
-                desired = bool(sig >= lo_thr)
+                if is_short:
+                    desired_dir = -1 if sig <= (1.0 - lo_thr) else 0
+                else:
+                    desired_dir = 1 if sig >= lo_thr else 0
             else:
-                desired = bool(sig >= threshold)
+                if sig >= threshold:
+                    desired_dir = 1
+                elif short and sig <= (1.0 - threshold):
+                    desired_dir = -1
+                else:
+                    desired_dir = 0
         else:
-            desired = False
+            desired_dir = 0
 
         # min_hold: не выходим раньше срока.
-        if in_pos and (not desired) and min_hold and entry_i is not None and (i - entry_i) < int(min_hold):
-            desired = True
+        if in_pos and desired_dir == 0 and min_hold and entry_i is not None and (i - entry_i) < int(min_hold):
+            desired_dir = -1 if is_short else 1
 
         # cooldown: не входим сразу после выхода.
-        if (not in_pos) and desired and cooldown and last_exit_i is not None and (i - last_exit_i) < int(cooldown):
-            desired = False
+        if (not in_pos) and desired_dir != 0 and cooldown and last_exit_i is not None and (i - last_exit_i) < int(cooldown):
+            desired_dir = 0
 
         # Маски и фильтры для ВХОДА.
-        if (not in_pos) and desired:
+        if (not in_pos) and desired_dir != 0:
             allowed = True
             if time_mask is not None and i < len(time_mask):
                 allowed = allowed and bool(time_mask[i])
@@ -125,64 +147,101 @@ def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=Non
                 allowed = allowed and bool(regime_mask[i])
             if trend_mask is not None and i < len(trend_mask):
                 allowed = allowed and bool(trend_mask[i])
-            if consensus is not None and min_consensus is not None:
+            if consensus is not None and min_consensus is not None and desired_dir in (1, -1):
                 if i > 0 and i - 1 < consensus.shape[0]:
                     idx = i - 1
                 else:
                     idx = min(i, consensus.shape[0] - 1)
-                if consensus.ndim == 2:
-                    row = consensus[idx]
+                row = consensus[idx]
+                arr = np.asarray(row, dtype=float).ravel()
+                if desired_dir == 1:
+                    # bullish consensus: большинство базовых моделей >= threshold
+                    cnt = int(np.sum(arr >= threshold))
                 else:
-                    row = consensus[idx]
-                cnt = int(np.sum(np.asarray(row) >= threshold))
+                    # bearish consensus для short: большинство базовых <= 1-threshold
+                    cnt = int(np.sum(arr <= (1.0 - threshold)))
                 allowed = allowed and (cnt >= int(min_consensus))
             if edge_mu_win is not None and edge_mu_loss is not None and np.isfinite(sig):
                 edge = float(edge_mu_win) * float(sig) - float(edge_mu_loss) * (1.0 - float(sig))
-                allowed = allowed and (edge > 0.0)
+                if desired_dir == 1:
+                    allowed = allowed and (edge > edge_threshold)
+                else:
+                    allowed = allowed and (edge < -edge_threshold)
+            if confidence_threshold is not None and np.isfinite(sig):
+                if desired_dir == 1:
+                    allowed = allowed and (float(sig) >= float(confidence_threshold))
+                else:
+                    allowed = allowed and (float(sig) <= (1.0 - float(confidence_threshold)))
             if not allowed:
-                desired = False
+                desired_dir = 0
 
-        # Trailing stop.
-        if (in_pos and trail_mult is not None and atr is not None
+        # Trailing stop. min_hold имеет приоритет: не закрываем раньше min_hold.
+        _min_hold_active = bool(min_hold) and entry_i is not None and (i - entry_i) < int(min_hold)
+        if (not _min_hold_active) and (in_pos and trail_mult is not None and atr is not None
                 and i < len(atr) and np.isfinite(atr[i]) and float(atr[i]) > 0.0
                 and float(trail_mult) > 0.0):
-            if peak_price is not None and price <= peak_price - float(trail_mult) * float(atr[i]):
-                desired = False
+            if (not is_short) and peak_price is not None and price <= peak_price - float(trail_mult) * float(atr[i]):
+                desired_dir = 0
+            if is_short and trough_price is not None and price >= trough_price + float(trail_mult) * float(atr[i]):
+                desired_dir = 0
 
         # Regime forced exit.
         if in_pos and regime_mask is not None and i < len(regime_mask) and not bool(regime_mask[i]):
-            desired = False
+            desired_dir = 0
 
         # Исполнение перехода.
-        if desired and not in_pos:
+        if desired_dir != 0 and not in_pos:
+            entry_capital = cash
             invest = cash
             fee = invest * cost_rate
-            shares = (invest - fee) / price if invest > 0 else 0.0
-            cash = 0.0
+            if desired_dir == 1:
+                shares = (invest - fee) / price if invest > 0 else 0.0
+                is_short = False
+                peak_price = price
+                trough_price = None
+                cash = 0.0
+            else:
+                # Short: продаём в шорт, получаем proceeds; shares < 0.
+                # cash += proceeds, MTM = cash + shares*price.
+                shares = -invest / price if invest > 0 else 0.0
+                is_short = True
+                peak_price = None
+                trough_price = price
+                cash = cash + invest - fee
             in_pos = True
             entry_i = i
-            peak_price = price
             trades.append({
                 "entry_i": i,
                 "entry_price": float(price),
-                "entry_cash": float(invest),
+                "entry_cash": float(entry_capital),
                 "exit_i": None,
                 "exit_price": None,
                 "pnl": None,
+                "side": "long" if desired_dir == 1 else "short",
             })
-        elif (not desired) and in_pos:
-            gross = shares * price
-            fee = gross * cost_rate
-            cash = gross - fee
+        elif desired_dir == 0 and in_pos:
+            if is_short:
+                # Покупаем обратно шорт: cash -= стоимость закрытия + комиссия.
+                gross_cost = -shares * price
+                fee = gross_cost * cost_rate
+                cash = cash - gross_cost - fee
+            else:
+                gross = shares * price
+                fee = gross * cost_rate
+                cash = gross - fee
             shares = 0.0
             in_pos = False
+            is_short = False
             last_exit_i = i
             if trades and trades[-1]["exit_i"] is None:
                 trades[-1]["exit_i"] = i
                 trades[-1]["exit_price"] = float(price)
                 trades[-1]["pnl"] = float(cash - trades[-1]["entry_cash"])
 
-        positions[i] = 1 if in_pos else 0
+        if in_pos:
+            positions[i] = -1 if is_short else 1
+        else:
+            positions[i] = 0
         mtm = cash + shares * price
         equity_curve.append(mtm)
 
@@ -190,11 +249,17 @@ def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=Non
     if in_pos and n > 0:
         price = prices[-1]
         if np.isfinite(price) and price > 0:
-            gross = shares * price
-            fee = gross * cost_rate
-            cash = gross - fee
+            if is_short:
+                gross_cost = -shares * price
+                fee = gross_cost * cost_rate
+                cash = cash - gross_cost - fee
+            else:
+                gross = shares * price
+                fee = gross * cost_rate
+                cash = gross - fee
             shares = 0.0
             in_pos = False
+            is_short = False
             if trades and trades[-1]["exit_i"] is None:
                 trades[-1]["exit_i"] = n - 1
                 trades[-1]["exit_price"] = float(price)
@@ -217,7 +282,7 @@ def simulate(prices, signals, threshold: float = 0.5, thr_lo=None, time_mask=Non
     peak = np.maximum.accumulate(equity_curve) if n else np.array([config.START_CAPITAL])
     dd = (equity_curve - peak) / (peak + 1e-12)
     max_dd = float(dd.min()) if n else 0.0
-    exposure = float(positions.mean()) if n else 0.0
+    exposure = float(np.mean(np.abs(positions))) if n else 0.0
 
     total_pnl = final_equity - config.START_CAPITAL
     total_ret = total_pnl / config.START_CAPITAL

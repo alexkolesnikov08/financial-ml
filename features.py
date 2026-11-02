@@ -55,6 +55,7 @@ def build(df: pd.DataFrame, cross_assets: dict | None = None) -> pd.DataFrame:
         df["date"] = local.date
 
     # Cross-asset: выравнивание строго backward (timestamp актива <= t).
+    cross_close_cols = []
     if cross_assets:
         for ticker, adf in cross_assets.items():
             if adf is None or (hasattr(adf, "empty") and adf.empty):
@@ -73,9 +74,12 @@ def build(df: pd.DataFrame, cross_assets: dict | None = None) -> pd.DataFrame:
             if "close" not in a.columns:
                 continue
             prefix = ticker.lower().replace("^", "").strip()
-            right = a[["close"]].rename(columns={"close": f"{prefix}_close"})
+            colname = f"{prefix}_close"
+            right = a[["close"]].rename(columns={"close": colname})
             df = pd.merge_asof(df, right, left_index=True, right_index=True,
                                direction="backward", tolerance=pd.Timedelta(minutes=60))
+            if colname not in cross_close_cols:
+                cross_close_cols.append(colname)
 
     close = df["close"]
     open_ = df["open"]
@@ -184,12 +188,7 @@ def build(df: pd.DataFrame, cross_assets: dict | None = None) -> pd.DataFrame:
     ret_std_20 = df["ret_1"].rolling(20, min_periods=20).std(ddof=0)
     df["ret_z_20"] = (df["ret_1"] - ret_mean_20) / ret_std_20.replace(0, np.nan)
     df["ret_percentile_20"] = df["ret_1"].rolling(20, min_periods=20).rank(pct=True)
-    def _autocorr(x):
-        s = pd.Series(x)
-        if s.std(ddof=0) == 0:
-            return np.nan
-        return float(s.autocorr(lag=1))
-    df["autocorr_ret_1_10"] = df["ret_1"].rolling(10, min_periods=10).apply(_autocorr, raw=False)
+    df["autocorr_ret_1_10"] = df["ret_1"].rolling(9, min_periods=9).corr(df["ret_1"].shift(1))
     df["skew_20"] = df["ret_1"].rolling(20, min_periods=20).skew()
     df["kurt_20"] = df["ret_1"].rolling(20, min_periods=20).kurt()
 
@@ -229,20 +228,24 @@ def build(df: pd.DataFrame, cross_assets: dict | None = None) -> pd.DataFrame:
     df["dow_cos"] = np.cos(2 * np.pi * df["dayofweek"] / 7.0)
 
     # Cross-asset фичи (если данные переданы) — обобщённо для любых *_close.
-    cross_cols = [c for c in df.columns if c.endswith("_close")]
+    cross_cols = [c for c in cross_close_cols if c in df.columns]
     if cross_cols:
         aapl_ret_1 = df["close"].pct_change()
         aapl_ret_5 = df["close"].pct_change(5)
-        # Первый кросс-актив используем для rel_strength (как раньше spy).
-        first = cross_cols[0]
-        first_prefix = first[:-6]  # strip "_close"
+        first_prefix = cross_cols[0][:-6]
         for c in cross_cols:
             prefix = c[:-6]
-            df[f"{prefix}_ret_1"] = df[c].pct_change()
+            asset_ret_1 = df[c].pct_change()
+            asset_ret_5 = df[c].pct_change(5)
+            df[f"{prefix}_ret_1"] = asset_ret_1
             # Для VIX используем diff уровня вместо pct_change? Оставляем pct_change унифицированно.
-            df[f"{prefix}_corr_20"] = aapl_ret_1.rolling(20, min_periods=20).corr(df[c].pct_change())
-        # rel_strength для первого актива
-        df["rel_strength_5"] = aapl_ret_5 - df[first].pct_change(5)
+            df[f"{prefix}_corr_20"] = aapl_ret_1.rolling(20, min_periods=20).corr(asset_ret_1)
+            # rel_strength для каждого актива (per-asset), а не только первого.
+            rs = aapl_ret_5 - asset_ret_5
+            df[f"{prefix}_rel_strength_5"] = rs
+            df[f"rel_strength_{prefix}_5"] = rs
+        # Обратная совместимость: rel_strength_5 для первого актива (как раньше).
+        df["rel_strength_5"] = df[f"{first_prefix}_rel_strength_5"]
         # Алиасы для обратной совместимости (spy/qqq/vix)
         if "spy_close" in cross_cols:
             df["spy_ret_1"] = df["spy_close"].pct_change() if "spy_ret_1" not in df.columns else df["spy_ret_1"]
@@ -290,9 +293,16 @@ def build(df: pd.DataFrame, cross_assets: dict | None = None) -> pd.DataFrame:
     drop_cols += ["vol_sma_20"]
     df = df.drop(columns=[c for c in drop_cols if c in df.columns])
 
-    # Удаляем строки с NaN в фичах (разогрев) и хвост без цели.
+    # Удаляем колонки, полностью состоящие из NaN (иначе dropna по строкам
+    # удаляет весь датасет, если хотя бы одна фича полностью NaN).
+    df = df.dropna(axis=1, how="all")
     feature_cols = feature_columns(df)
+    if df.empty or not feature_cols:
+        raise ValueError("После удаления полностью-NaN колонок датасет пуст или нет признаков")
+    # Удаляем строки с NaN в фичах (разогрев) и хвост без цели.
     df = df.dropna(subset=feature_cols + [config.TARGET_COL])
+    if df.empty:
+        raise ValueError("После dropna датасет пуст — недостаточно данных для обучения")
     return df
 
 
@@ -309,3 +319,87 @@ def split_xy(df: pd.DataFrame):
     X = df[cols].copy()
     y = df[config.TARGET_COL].astype(int).copy()
     return X, y, cols
+
+def _is_classification_target(y: pd.Series) -> bool:
+    y = pd.Series(y)
+    if y.dtype.kind in ("f", "c"):
+        # непрерывная цель с большим числом уникальных значений -> регрессия
+        if y.nunique(dropna=True) > 20:
+            return False
+    return True
+
+
+def select_features(X, y, method: str = "importance", top_k: int = 40) -> list[str]:
+    """Отбор признаков.
+
+    Возвращает список колонок (имён) длиной не более top_k.
+    method: 'importance' (RandomForest importance) или 'l1' (L1-регуляризация).
+    """
+    import numpy as np
+    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+    from sklearn.linear_model import LogisticRegression, Lasso
+    from sklearn.preprocessing import StandardScaler
+
+    Xdf = pd.DataFrame(X).copy()
+    cols = list(Xdf.columns)
+    if len(cols) == 0:
+        return []
+    yser = pd.Series(y).reset_index(drop=True)
+    Xdf = Xdf.reset_index(drop=True)
+
+    # Guard: вырожденная цель (один класс) — отбор невозможен, возвращаем все колонки.
+    if yser.nunique(dropna=True) < 2:
+        return [str(c) for c in cols]
+
+    # Приведение к числовому типу + заполнение пропусков.
+    for c in cols:
+        Xdf[c] = pd.to_numeric(Xdf[c], errors="coerce")
+    medians = Xdf.median(numeric_only=True)
+    Xdf = Xdf.fillna(medians).fillna(0.0)
+
+    top_k = min(int(top_k), len(cols))
+    if top_k <= 0:
+        return []
+
+    clf = _is_classification_target(yser)
+
+    if method == "importance":
+        if clf:
+            model = RandomForestClassifier(
+                n_estimators=200, random_state=getattr(config, "RANDOM_STATE", 42),
+                n_jobs=1,
+            )
+        else:
+            model = RandomForestRegressor(
+                n_estimators=200, random_state=getattr(config, "RANDOM_STATE", 42),
+                n_jobs=1,
+            )
+        model.fit(Xdf[cols], yser)
+        scores = pd.Series(getattr(model, "feature_importances_", np.zeros(len(cols))), index=cols)
+    elif method == "l1":
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(Xdf[cols])
+        if clf:
+            model = LogisticRegression(
+                penalty="l1", solver="liblinear", C=1.0,
+                max_iter=2000, random_state=getattr(config, "RANDOM_STATE", 42),
+            )
+        else:
+            model = Lasso(alpha=0.01, max_iter=100000, random_state=getattr(config, "RANDOM_STATE", 42))
+        model.fit(Xs, yser)
+        coef = getattr(model, "coef_", np.zeros(len(cols)))
+        coef = np.asarray(coef).ravel()
+        if coef.shape[0] != len(cols):
+            coef = np.zeros(len(cols))
+        scores = pd.Series(np.abs(coef), index=cols)
+    else:
+        raise ValueError(f"Неизвестный method: {method}")
+
+    # Если все оценки нулевые — отбираем по дисперсии, затем по порядку.
+    if float(scores.sum()) == 0.0 or scores.isna().all():
+        variances = Xdf[cols].var(numeric_only=True).fillna(0.0)
+        scores = variances
+
+    ranked = scores.sort_values(ascending=False, kind="mergesort")
+    selected = ranked.index[:top_k].tolist()
+    return [str(c) for c in selected]

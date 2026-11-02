@@ -83,22 +83,59 @@ def to_local(df: pd.DataFrame, tz: str = config.TZ) -> pd.DataFrame:
     return df
 
 
-def load_or_download(interval: str | None = None,
-                     force: bool = False) -> pd.DataFrame:
-    """Загрузить кэшированный parquet или скачать заново.
+def _min_bars_for(timeframe: str) -> int:
+    """Минимальное число баров для валидации истории по таймфрейму."""
+    tf = (timeframe or "").lower()
+    return {
+        "5m": 500,
+        "15m": 300,
+        "1h": 200,
+        "1d": 200,
+    }.get(tf, 200)
 
-    Пробует preferred interval, при неудаче/малой истории - fallback.
-    """
+
+def period_for_timeframe(timeframe: str | None = None) -> str:
+    """Подобрать период загрузки yfinance для таймфрейма."""
+    tf = (timeframe if timeframe is not None else getattr(config, "TIMEFRAME", "5m")).lower()
+    if tf == "1h":
+        return "730d"
+    if tf == "1d":
+        return "5y"
+    return getattr(config, "DOWNLOAD_PERIOD", "60d")
+
+
+def list_timeframes() -> list[str]:
+    """Поддерживаемые таймфреймы (v1.3)."""
+    tfs = getattr(config, "TIMEFRAMES", None)
+    if not tfs:
+        tfs = ["5m", "15m", "1h", "1d"]
+    return list(tfs)
+
+
+def load_or_download(interval: str | None = None,
+                      period: str | None = None,
+                      force: bool = False,
+                      min_bars: int | None = None) -> pd.DataFrame:
+    """Загрузить кэшированный parquet или скачать заново."""
     if interval is None:
-        interval = config.PREFERRED_INTERVAL
+        interval = getattr(config, "TIMEFRAME", config.PREFERRED_INTERVAL)
+    if period is None:
+        period = period_for_timeframe(interval)
+    if min_bars is None:
+        min_bars = _min_bars_for(interval)
     cache = config.DATA_DIR / f"{config.TICKER}_{interval}.parquet"
     if cache.exists() and not force:
-        df = pd.read_parquet(cache)
-        if len(df) >= 200:
-            return df
-    # Скачиваем
+        try:
+            df = pd.read_parquet(cache)
+            if len(df) >= 200:
+                try:
+                    return ensure_min_history(df, min_bars=min_bars)
+                except RuntimeError:
+                    return df
+        except Exception:
+            pass
     try:
-        df = download(config.TICKER, interval, config.DOWNLOAD_PERIOD)
+        df = download(config.TICKER, interval, period)
         df = clean(df)
     except Exception as e:
         if interval != config.FALLBACK_INTERVAL:
@@ -108,6 +145,7 @@ def load_or_download(interval: str | None = None,
     if len(df) < 200 and interval != config.FALLBACK_INTERVAL:
         print(f"[data] {interval}: мало строк ({len(df)}), fallback на {config.FALLBACK_INTERVAL}")
         return load_or_download(config.FALLBACK_INTERVAL, force=True)
+    df = ensure_min_history(df, min_bars=min_bars)
     df.to_parquet(cache)
     return df
 
@@ -135,11 +173,11 @@ def _load_one_cross(ticker: str,
     except Exception as e:
         if interval != config.FALLBACK_INTERVAL:
             print(f"[data] {ticker} {interval} не удался ({e}), пробую {config.FALLBACK_INTERVAL}")
-            return _load_one_cross(ticker, config.FALLBACK_INTERVAL, period)
+            return _load_one_cross(ticker, config.FALLBACK_INTERVAL, period_for_timeframe(config.FALLBACK_INTERVAL))
         raise
     if len(df) < 200 and interval != config.FALLBACK_INTERVAL:
         print(f"[data] {ticker} {interval}: мало строк ({len(df)}), fallback на {config.FALLBACK_INTERVAL}")
-        return _load_one_cross(ticker, config.FALLBACK_INTERVAL, period)
+        return _load_one_cross(ticker, config.FALLBACK_INTERVAL, period_for_timeframe(config.FALLBACK_INTERVAL))
     df.to_parquet(cache)
     return df
 
@@ -150,15 +188,21 @@ def load_cross_assets(interval: str | None = None,
 
     Возвращает dict ticker -> DataFrame (UTC DatetimeIndex, очищенный).
     Кэш parquet per ticker/interval. Скачивание через HTTP-session (yfinance).
+    По умолчанию использует config.TIMEFRAME.
     """
     if interval is None:
-        interval = config.PREFERRED_INTERVAL
+        interval = getattr(config, "TIMEFRAME", config.PREFERRED_INTERVAL)
     if period is None:
-        period = config.DOWNLOAD_PERIOD
+        period = period_for_timeframe(interval)
     out = {}
     for ticker in getattr(config, "CROSS_ASSETS", []):
         try:
-            out[ticker] = _load_one_cross(ticker, interval, period)
+            df = _load_one_cross(ticker, interval, period)
+            try:
+                df = ensure_min_history(df, min_bars=_min_bars_for(interval))
+            except RuntimeError:
+                pass
+            out[ticker] = df
         except Exception as e:
             print(f"[data] не удалось загрузить {ticker}: {e}")
     return out

@@ -18,7 +18,7 @@ import cv_oof as CO
 import ensemble as ENS
 import backtest as BT
 import eval as EV
-from features import split_xy
+from features import split_xy, select_features
 import persist as PERSIST
 
 
@@ -36,7 +36,7 @@ def _optimize_threshold(prices, signals, grid=config.THRESHOLD_GRID, min_trades:
     candidates = []
     for thr in grid:
         try:
-            res = BT.simulate(prices, signals, float(thr))
+            res = BT.simulate(prices, signals, float(thr), confidence_threshold=0.0)
         except Exception:
             continue
         nt = int(res.get("num_trades", 0) or 0)
@@ -68,6 +68,10 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
     train_df = df_feat.iloc[np.where(train_mask)[0]].copy()
     hold_df = df_feat.iloc[np.where(holdout_mask)[0]].copy()
 
+    if train_df.empty or hold_df.empty:
+        raise ValueError(
+            f"Пустой train/holdout: train={len(train_df)}, holdout={len(hold_df)}")
+
     train_prices = train_df["close"].values
     hold_prices = hold_df["close"].values
 
@@ -75,10 +79,13 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
     time_mask = None
     try:
         _tf = getattr(config, "TIME_FILTERS", None)
-        if isinstance(_tf, dict):
-            time_mask = BT.make_time_mask(hold_df, **_tf)
-        else:
-            time_mask = BT.make_time_mask(hold_df)
+        if _tf is not None:
+            if isinstance(_tf, dict):
+                time_mask = BT.make_time_mask(hold_df, **_tf)
+            elif _tf is True:
+                time_mask = BT.make_time_mask(hold_df)
+            else:
+                time_mask = None
         if time_mask is not None:
             time_mask = np.asarray(time_mask, dtype=bool)
     except Exception as e:
@@ -87,14 +94,16 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
 
     trend_mask = None
     try:
-        if "ema_50" in hold_df.columns:
-            _tm = hold_df["close"] > hold_df["ema_50"]
-            if "ema_20" in hold_df.columns:
-                _tm = _tm | (hold_df["ema_20"] > hold_df["ema_50"])
-            trend_mask = np.asarray(_tm.fillna(False), dtype=bool)
-        elif "sma_50" in hold_df.columns:
-            _tm = hold_df["close"] > hold_df["sma_50"]
-            trend_mask = np.asarray(_tm.fillna(False), dtype=bool)
+        _use_trend = bool(getattr(config, "USE_TREND_MASK", False)) or getattr(config, "TREND_MASK", None) is not None
+        if _use_trend:
+            if "ema_50" in hold_df.columns:
+                _tm = hold_df["close"] > hold_df["ema_50"]
+                if "ema_20" in hold_df.columns:
+                    _tm = _tm | (hold_df["ema_20"] > hold_df["ema_50"])
+                trend_mask = np.asarray(_tm.fillna(False), dtype=bool)
+            elif "sma_50" in hold_df.columns:
+                _tm = hold_df["close"] > hold_df["sma_50"]
+                trend_mask = np.asarray(_tm.fillna(False), dtype=bool)
     except Exception:
         trend_mask = None
 
@@ -103,6 +112,8 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
         atr_arr = np.asarray(hold_df["atr_14"].values, dtype=float)
 
     thr_hi = getattr(config, "THR_HI", None)
+    if thr_hi is None:
+        thr_hi = getattr(config, "CONFIDENCE_THRESHOLD", None)
     thr_lo = getattr(config, "THR_LO", None)
     min_hold = getattr(config, "MIN_HOLD", 0)
     cooldown = getattr(config, "COOLDOWN", 0)
@@ -111,6 +122,19 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
 
     Xtr, ytr, cols = split_xy(train_df)
     Xho, yho, _ = split_xy(hold_df)
+
+    # Feature selection (v1.3): отбор признаков на train, применяем к hold-out.
+    if bool(getattr(config, "FEATURE_SELECTION", False)):
+        try:
+            selected = select_features(
+                Xtr, ytr, method="importance",
+                top_k=getattr(config, "FEATURE_TOP_K", 40))
+            if selected:
+                Xtr = Xtr[selected]
+                Xho = Xho[selected]
+                cols = list(selected)
+        except Exception as e:
+            print(f"[feature_selection] FAILED {e}")
 
     folds = SP.time_folds(len(Xtr), n_folds=config.N_FOLDS,
                           val_fraction=config.VAL_FRACTION, mode=config.CV_MODE,
@@ -192,6 +216,48 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
         thr, _ = _optimize_threshold(train_prices, proba)
         ens_thresholds[name] = thr
 
+    # Edge-параметры на OOF: средние движения на выигрышных/убыточных сделках
+    # базовой стратегии (soft mean по OOF). Long-only OOF-сигнал: для short
+    # параметры оставляем как есть (long-only), edge-фильтр применяется в backtest
+    # с учётом направления сделки.
+    edge_mu_win = None
+    edge_mu_loss = None
+    try:
+        if oof_dict:
+            oof_arrays = [np.asarray(v, dtype=float) for v in oof_dict.values()]
+            # soft mean с nanmean по столбцам
+            stacked = np.column_stack(oof_arrays)
+            oof_signal = np.nanmean(stacked, axis=1)
+            oof_signal = np.where(np.isfinite(oof_signal), oof_signal, np.nan)
+            _edge_thr = thr_hi if thr_hi is not None else 0.5
+            edge_sim = BT.simulate(train_prices, oof_signal, float(_edge_thr))
+            _trades = edge_sim.get("trades", []) or []
+            _wins = []
+            _losses = []
+            for t in _trades:
+                if t.get("exit_i") is None or t.get("pnl") is None:
+                    continue
+                ep = t.get("entry_price")
+                xp = t.get("exit_price")
+                if ep is None or xp is None:
+                    continue
+                try:
+                    move = float(xp) / float(ep) - 1.0
+                except Exception:
+                    continue
+                if t["pnl"] > 0:
+                    _wins.append(move)
+                elif t["pnl"] < 0:
+                    _losses.append(abs(move))
+            if _wins:
+                edge_mu_win = float(np.mean(_wins))
+            if _losses:
+                edge_mu_loss = float(np.mean(_losses))
+    except Exception as e:
+        print(f"[edge] FAILED {e}")
+        edge_mu_win = None
+        edge_mu_loss = None
+
     # 8. Ансамбли на hold-out.
     ens_hold_probas = {}
     ens_hold_probas["ens_soft_mean"] = ENS.soft_mean(base_hold_proba)
@@ -237,6 +303,11 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
             "trail_mult": trail_mult,
             "min_hold": min_hold,
             "cooldown": cooldown,
+            "edge_mu_win": edge_mu_win,
+            "edge_mu_loss": edge_mu_loss,
+            "edge_threshold": getattr(config, "EDGE_THRESHOLD", None),
+            "confidence_threshold": getattr(config, "CONFIDENCE_THRESHOLD", None),
+            "short": getattr(config, "USE_SHORT", False),
         }
         if use_consensus and consensus_matrix is not None:
             kw["consensus_signals"] = consensus_matrix
@@ -254,7 +325,8 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
             thr = thr_hi
         sim = BT.simulate(hold_prices, proba, thr, **_sim_kwargs())
         results[name] = sim
-        base_rows.append(EV.summarize_holdout(sim, name))
+        y_pred = (np.asarray(proba) >= thr).astype(int)
+        base_rows.append(EV.summarize_holdout(sim, name, y_true=yho, y_pred=y_pred))
 
     # Ансамбли.
     ens_rows = []
@@ -265,7 +337,8 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
             thr = thr_hi
         sim = BT.simulate(hold_prices, proba, thr, **_sim_kwargs())
         results[name] = sim
-        ens_rows.append(EV.summarize_holdout(sim, name))
+        y_pred = (np.asarray(proba) >= thr).astype(int)
+        ens_rows.append(EV.summarize_holdout(sim, name, y_true=yho, y_pred=y_pred))
 
     # Бенчмарки.
     bh = BT.buy_and_hold(hold_prices)
@@ -283,11 +356,13 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
          "total_return": bh["total_return"], "num_trades": 1, "num_closed": 1,
          "winrate": 1.0, "profit_factor": bh.get("profit_factor", None),
          "max_drawdown": bh["max_drawdown"], "exposure": 1.0,
-         "avg_trade": bh["final_equity"] - config.START_CAPITAL},
+         "avg_trade": bh["final_equity"] - config.START_CAPITAL,
+         "accuracy": None, "precision": None, "recall": None, "f1": None},
         {"name": "cash", "final_equity": cash["final_equity"],
          "total_return": 0.0, "num_trades": 0, "num_closed": 0,
          "winrate": 0.0, "profit_factor": 0.0, "max_drawdown": 0.0,
-         "exposure": 0.0, "avg_trade": 0.0},
+         "exposure": 0.0, "avg_trade": 0.0,
+         "accuracy": None, "precision": None, "recall": None, "f1": None},
     ])], ignore_index=True)
 
     # Сохранение артефактов (joblib).
@@ -299,6 +374,10 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
         "TRAIL_MULT": getattr(config, "TRAIL_MULT", None),
         "TIME_FILTERS": getattr(config, "TIME_FILTERS", None),
         "USE_CONSENSUS": getattr(config, "USE_CONSENSUS", None),
+        "CONFIDENCE_THRESHOLD": getattr(config, "CONFIDENCE_THRESHOLD", None),
+        "USE_SHORT": getattr(config, "USE_SHORT", None),
+        "edge_mu_win": edge_mu_win,
+        "edge_mu_loss": edge_mu_loss,
     }
     try:
         PERSIST.save_models(
@@ -319,6 +398,27 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
     except Exception as e:
         print(f"[persist] FAILED {e}")
 
+    # Regime-анализ (если включён): используем split.regime_split и eval.regime_metrics.
+    regime_analysis = None
+    if bool(getattr(config, "REGIME_ANALYSIS", False)):
+        try:
+            regime_masks = SP.regime_split(df_feat, holdout)
+            thr_map = {**base_thresholds, **ens_thresholds}
+            all_probas = {}
+            all_probas.update(base_hold_proba)
+            all_probas.update(ens_hold_probas)
+            regime_analysis = {}
+            for name, proba in all_probas.items():
+                thr = thr_hi if thr_hi is not None else thr_map.get(name, 0.5)
+                y_pred = (np.asarray(proba) >= float(thr)).astype(int)
+                try:
+                    regime_analysis[name] = EV.regime_metrics(yho, y_pred, regime_masks)
+                except Exception as e:
+                    print(f"[regime_metrics] {name}: FAILED {e}")
+        except Exception as e:
+            print(f"[regime_analysis] FAILED {e}")
+            regime_analysis = None
+
     return {
         "holdout": holdout["name"],
         "holdout_start": str(holdout["holdout_start"]),
@@ -331,6 +431,7 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
         "oof": oof_dict,
         "train_prices": train_prices,
         "feature_columns": cols,
+        "regime_analysis": regime_analysis,
     }
 
 
@@ -363,7 +464,12 @@ def run_pipeline(df_feat: pd.DataFrame, n_holdouts: int = config.N_HOLDOUTS) -> 
             })
     agg_df = pd.DataFrame(agg_rows).sort_values("final_equity_mean", ascending=False)
 
+    regime_analysis = None
+    if bool(getattr(config, "REGIME_ANALYSIS", False)):
+        regime_analysis = [r.get("regime_analysis") for r in per_holdout]
+
     return {
         "per_holdout": per_holdout,
         "aggregate": agg_df,
+        "regime_analysis": regime_analysis,
     }

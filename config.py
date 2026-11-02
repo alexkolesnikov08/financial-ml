@@ -21,6 +21,9 @@ TICKER = "AAPL"
 # Предпочитаемый интервал. Если истории мало - fallback на 15m.
 PREFERRED_INTERVAL = "5m"
 FALLBACK_INTERVAL = "15m"
+# Таймфрейм по умолчанию (v1.3): поддерживаемые см. TIMEFRAMES.
+TIMEFRAME = "5m"
+TIMEFRAMES = ["5m", "15m", "1h", "1d"]
 # Период загрузки у yfinance для интрадей (макс ~60 дней для 5m/15m).
 DOWNLOAD_PERIOD = "60d"
 # Часовой пояс для интрадей-фичей.
@@ -43,9 +46,10 @@ MIN_TRAIN_FRACTION = 0.3
 
 # ---------------- Multi-holdout ----------------
 # Сколько untouched hold-out периодов прогнать и усреднить.
-N_HOLDOUTS = 2
+N_HOLDOUTS = 4
 # Длина одного hold-out в днях (календарных).
 HOLDOUT_DAYS = 14
+# Анализ по режимам рынка на hold-out (см. также REGIME_ANALYSIS в секции "Стратегия").
 
 # ---------------- Издержки бота ----------------
 # Доля с оборота на одну сделку (вход+выход считается отдельно).
@@ -76,20 +80,33 @@ CALIBRATION_METHODS = ("sigmoid", "isotonic", "temperature", "beta")
 # Пороги перебираем на валидационных OOF (только train+val).
 THRESHOLD_GRID = [i / 1000 for i in range(400, 601)]  # 0.40..0.60
 
-# ---------------- Стратегия (v1.1) ----------------
-THR_HI = 0.55
-THR_LO = 0.45
-MIN_HOLD = 3
-COOLDOWN = 2
-TRAIL_MULT = 1.5
+# ---------------- Стратегия (v1.3) ----------------
+# Агрессивные фильтры отключены по умолчанию.
+THR_HI = None
+THR_LO = None
+MIN_HOLD = 0
+COOLDOWN = 0
+TRAIL_MULT = None
 TIME_FILTERS = None
 # Консенсус базовых моделей при входе (опционально).
 USE_CONSENSUS = False
+# Порог уверенности: покупаем только при p >= CONFIDENCE_THRESHOLD.
+CONFIDENCE_THRESHOLD = 0.55
+# Порог edge-фильтра (0.0 = без дополнительного порога).
+EDGE_THRESHOLD = 0.0
+# Разрешить шорт (по умолчанию выключено).
+USE_SHORT = False
+# Включить regime-анализ в пайплайне.
+REGIME_ANALYSIS = True
 # ---------------- Воспроизводимость ----------------
 N_JOBS = -1
 
 # ---------------- Cross-asset ----------------
 CROSS_ASSETS = ['SPY', 'QQQ', '^VIX']
 USE_CROSS_ASSETS = True
+
+# ---------------- Feature selection (v1.3) ----------------
+FEATURE_SELECTION = True
+FEATURE_TOP_K = 40
 """ 
 """
