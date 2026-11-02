@@ -22,7 +22,7 @@ TICKER = "AAPL"
 PREFERRED_INTERVAL = "5m"
 FALLBACK_INTERVAL = "15m"
 # Таймфрейм по умолчанию (v1.3): поддерживаемые см. TIMEFRAMES.
-TIMEFRAME = "5m"
+TIMEFRAME = "1h"
 TIMEFRAMES = ["5m", "15m", "1h", "1d"]
 # Период загрузки у yfinance для интрадей (макс ~60 дней для 5m/15m).
 DOWNLOAD_PERIOD = "60d"
