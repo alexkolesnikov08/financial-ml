@@ -1,31 +1,52 @@
 {
   "aggregate": [
     {
-      "name": "logreg_l2",
-      "final_equity_mean": 1011.2661533415826,
-      "final_equity_std": 11.27640955336625,
-      "final_equity_min": 999.9897437882163,
-      "n_holdouts": 2
-    },
-    {
       "name": "logreg_l1",
-      "final_equity_mean": 1010.8988605956918,
-      "final_equity_std": 10.738696288060794,
+      "final_equity_mean": 1015.9111869063572,
+      "final_equity_std": 15.751022598726195,
       "final_equity_min": 1000.160164307631,
       "n_holdouts": 2
     },
     {
       "name": "logreg_elastic",
-      "final_equity_mean": 1010.8988605956918,
-      "final_equity_std": 10.738696288060794,
+      "final_equity_mean": 1015.9111869063572,
+      "final_equity_std": 15.751022598726195,
       "final_equity_min": 1000.160164307631,
       "n_holdouts": 2
     },
     {
-      "name": "ridge_calibrated",
-      "final_equity_mean": 1009.3398133456208,
-      "final_equity_std": 13.202749549328075,
-      "final_equity_min": 996.1370637962926,
+      "name": "lda",
+      "final_equity_mean": 1013.0080364098129,
+      "final_equity_std": 20.87433582770234,
+      "final_equity_min": 992.1337005821106,
+      "n_holdouts": 2
+    },
+    {
+      "name": "logreg_l2",
+      "final_equity_mean": 1012.5474366119377,
+      "final_equity_std": 9.995126283011132,
+      "final_equity_min": 1002.5523103289265,
+      "n_holdouts": 2
+    },
+    {
+      "name": "gaussian_nb",
+      "final_equity_mean": 1009.8747432890107,
+      "final_equity_std": 15.046298991611309,
+      "final_equity_min": 994.8284442973994,
+      "n_holdouts": 2
+    },
+    {
+      "name": "stack_meta_lda",
+      "final_equity_mean": 1009.2909693388834,
+      "final_equity_std": 13.251593556065359,
+      "final_equity_min": 996.0393757828181,
+      "n_holdouts": 2
+    },
+    {
+      "name": "rf",
+      "final_equity_mean": 1009.2189759613341,
+      "final_equity_std": 13.323586933614763,
+      "final_equity_min": 995.8953890277193,
       "n_holdouts": 2
     },
     {
@@ -33,13 +54,6 @@
       "final_equity_mean": 1008.9064590862226,
       "final_equity_std": 14.048904639281147,
       "final_equity_min": 994.8575544469415,
-      "n_holdouts": 2
-    },
-    {
-      "name": "ens_weighted_soft",
-      "final_equity_mean": 1008.6855035961742,
-      "final_equity_std": 13.857059298774686,
-      "final_equity_min": 994.8284442973994,
       "n_holdouts": 2
     },
     {
@@ -92,7 +106,42 @@
       "n_holdouts": 2
     },
     {
+      "name": "ens_weighted_soft",
+      "final_equity_mean": 1008.6855035961742,
+      "final_equity_std": 13.857059298774686,
+      "final_equity_min": 994.8284442973994,
+      "n_holdouts": 2
+    },
+    {
       "name": "ens_soft_mean",
+      "final_equity_mean": 1008.6855035961742,
+      "final_equity_std": 13.857059298774686,
+      "final_equity_min": 994.8284442973994,
+      "n_holdouts": 2
+    },
+    {
+      "name": "dummy",
+      "final_equity_mean": 1008.6855035961742,
+      "final_equity_std": 13.857059298774686,
+      "final_equity_min": 994.8284442973994,
+      "n_holdouts": 2
+    },
+    {
+      "name": "catboost",
+      "final_equity_mean": 1008.6855035961742,
+      "final_equity_std": 13.857059298774686,
+      "final_equity_min": 994.8284442973994,
+      "n_holdouts": 2
+    },
+    {
+      "name": "histgb",
+      "final_equity_mean": 1008.6855035961742,
+      "final_equity_std": 13.857059298774686,
+      "final_equity_min": 994.8284442973994,
+      "n_holdouts": 2
+    },
+    {
+      "name": "knn",
       "final_equity_mean": 1008.6855035961742,
       "final_equity_std": 13.857059298774686,
       "final_equity_min": 994.8284442973994,
@@ -113,31 +162,24 @@
       "n_holdouts": 2
     },
     {
-      "name": "rf",
+      "name": "bernoulli_nb",
       "final_equity_mean": 1008.6855035961742,
       "final_equity_std": 13.857059298774686,
       "final_equity_min": 994.8284442973994,
       "n_holdouts": 2
     },
     {
-      "name": "histgb",
-      "final_equity_mean": 1008.6855035961742,
-      "final_equity_std": 13.857059298774686,
-      "final_equity_min": 994.8284442973994,
+      "name": "ens_hard_vote",
+      "final_equity_mean": 1001.2469552895305,
+      "final_equity_std": 1.246955289530547,
+      "final_equity_min": 1000.0,
       "n_holdouts": 2
     },
     {
-      "name": "sgd_logloss",
-      "final_equity_mean": 1008.6855035961742,
-      "final_equity_std": 13.857059298774686,
-      "final_equity_min": 994.8284442973994,
-      "n_holdouts": 2
-    },
-    {
-      "name": "stack_meta_histgb",
-      "final_equity_mean": 1003.5926167974899,
-      "final_equity_std": 19.365259895139616,
-      "final_equity_min": 984.2273569023503,
+      "name": "ada_boost",
+      "final_equity_mean": 1000.9166134806228,
+      "final_equity_std": 21.625949414326044,
+      "final_equity_min": 979.2906640662967,
       "n_holdouts": 2
     },
     {
@@ -149,37 +191,51 @@
     },
     {
       "name": "et",
-      "final_equity_mean": 997.9211164193812,
-      "final_equity_std": 2.078883580618765,
-      "final_equity_min": 995.8422328387625,
+      "final_equity_mean": 997.4142221486998,
+      "final_equity_std": 2.5857778513002927,
+      "final_equity_min": 994.8284442973994,
       "n_holdouts": 2
     },
     {
-      "name": "ens_hard_vote",
-      "final_equity_mean": 997.7419420870378,
-      "final_equity_std": 2.2580579129621583,
-      "final_equity_min": 995.4838841740757,
+      "name": "ridge_calibrated",
+      "final_equity_mean": 995.3393649404214,
+      "final_equity_std": 2.149386283730337,
+      "final_equity_min": 993.1899786566911,
+      "n_holdouts": 2
+    },
+    {
+      "name": "stack_meta_histgb",
+      "final_equity_mean": 994.8720399835029,
+      "final_equity_std": 16.432883883213833,
+      "final_equity_min": 978.439156100289,
       "n_holdouts": 2
     },
     {
       "name": "stack_meta_lgbm",
-      "final_equity_mean": 991.3235069039522,
-      "final_equity_std": 14.260632692140177,
-      "final_equity_min": 977.0628742118121,
+      "final_equity_mean": 993.4476110980058,
+      "final_equity_std": 16.423602296565548,
+      "final_equity_min": 977.0240088014403,
       "n_holdouts": 2
     },
     {
       "name": "ens_rank_avg",
-      "final_equity_mean": 964.1447302632075,
-      "final_equity_std": 1.5864986873703515,
-      "final_equity_min": 962.5582315758371,
+      "final_equity_mean": 991.7057516968318,
+      "final_equity_std": 22.270305071787675,
+      "final_equity_min": 969.4354466250442,
       "n_holdouts": 2
     },
     {
-      "name": "catboost",
-      "final_equity_mean": 961.8627002998439,
-      "final_equity_std": 32.965743997555535,
-      "final_equity_min": 928.8969563022883,
+      "name": "stack_meta_gaussian_nb",
+      "final_equity_mean": 988.0168576096564,
+      "final_equity_std": 34.52570528529242,
+      "final_equity_min": 953.491152324364,
+      "n_holdouts": 2
+    },
+    {
+      "name": "sgd_logloss",
+      "final_equity_mean": 981.6909172787978,
+      "final_equity_std": 13.137527018601588,
+      "final_equity_min": 968.5533902601962,
       "n_holdouts": 2
     }
   ]
