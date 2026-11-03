@@ -19,21 +19,27 @@ import config
 warnings.filterwarnings("ignore")
 
 
-def _session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update({"User-Agent": "Mozilla/5.0"})
-    return s
+def _session():
+    try:
+        from curl_cffi import requests as crequests
+        s = crequests.Session(impersonate="chrome")
+        return s
+    except Exception:
+        return None
 
 
 def download(ticker: str = config.TICKER,
              interval: str = config.PREFERRED_INTERVAL,
-             period: str = config.DOWNLOAD_PERIOD) -> pd.DataFrame:
+             period: str = None) -> pd.DataFrame:
+    if period is None:
+        period = period_for_timeframe(interval)
     """Скачать OHLCV через yfinance. Возвращает DataFrame с DatetimeIndex (UTC)."""
-    df = yf.download(
-        ticker, interval=interval, period=period,
-        auto_adjust=True, progress=False, threads=False,
-        session=_session(),
-    )
+    sess = _session()
+    kwargs = dict(tickers=ticker, interval=interval, period=period,
+                  auto_adjust=True, progress=False, threads=False)
+    if sess is not None:
+        kwargs["session"] = sess
+    df = yf.download(**kwargs)
     if df is None or df.empty:
         raise RuntimeError(f"yfinance вернул пустой DataFrame для {ticker} {interval}")
     # yfinance иногда возвращает MultiIndex-колонки

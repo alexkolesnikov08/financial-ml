@@ -1,0 +1,12 @@
+yfinance>=0.2.40
+pandas>=2.0
+numpy>=1.26
+pyarrow>=14.0
+scikit-learn>=1.4
+lightgbm>=4.0
+xgboost>=2.0
+catboost>=1.2
+matplotlib>=3.8
+tqdm>=4.66
+scipy>=1.11
+optuna>=3.5
