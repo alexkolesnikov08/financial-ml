@@ -46,7 +46,7 @@ MIN_TRAIN_FRACTION = 0.3
 
 # ---------------- Multi-holdout ----------------
 # Сколько untouched hold-out периодов прогнать и усреднить.
-N_HOLDOUTS = 4
+N_HOLDOUTS = 8
 # Длина одного hold-out в днях (календарных).
 HOLDOUT_DAYS = 14
 # Анализ по режимам рынка на hold-out (см. также REGIME_ANALYSIS в секции "Стратегия").
@@ -87,15 +87,18 @@ THR_LO = None
 MIN_HOLD = 0
 COOLDOWN = 0
 TRAIL_MULT = None
+USE_TREND_MASK = True
 TIME_FILTERS = None
 # Консенсус базовых моделей при входе (опционально).
 USE_CONSENSUS = False
 # Порог уверенности: покупаем только при p >= CONFIDENCE_THRESHOLD.
 CONFIDENCE_THRESHOLD = 0.55
+# Порог уверенности для шорта: short при p <= 1 - CONFIDENCE_THRESHOLD.
 # Порог edge-фильтра (0.0 = без дополнительного порога).
 EDGE_THRESHOLD = 0.0
+SHORT_CONFIDENCE_THRESHOLD = 0.45
 # Разрешить шорт (по умолчанию выключено).
-USE_SHORT = False
+USE_SHORT = True
 # Включить regime-анализ в пайплайне.
 REGIME_ANALYSIS = True
 # ---------------- Воспроизводимость ----------------

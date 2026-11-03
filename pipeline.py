@@ -27,7 +27,8 @@ def save_models(*args, **kwargs):
     return PERSIST.save_models(*args, **kwargs)
 
 
-def _optimize_threshold(prices, signals, grid=config.THRESHOLD_GRID, min_trades: int = 5):
+def _optimize_threshold(prices, signals, grid=config.THRESHOLD_GRID, min_trades: int = 5,
+                           thr_lo_fixed=None, short: bool = False):
     prices = np.asarray(prices, dtype=float)
     signals = np.asarray(signals, dtype=float)
     best_thr = 0.5
@@ -36,7 +37,12 @@ def _optimize_threshold(prices, signals, grid=config.THRESHOLD_GRID, min_trades:
     candidates = []
     for thr in grid:
         try:
-            res = BT.simulate(prices, signals, float(thr), confidence_threshold=0.0)
+            _kw = dict(confidence_threshold=0.0)
+            if thr_lo_fixed is not None:
+                _kw['thr_lo'] = float(thr_lo_fixed)
+            if short:
+                _kw['short'] = True
+            res = BT.simulate(prices, signals, float(thr), **_kw)
         except Exception:
             continue
         nt = int(res.get("num_trades", 0) or 0)
@@ -59,6 +65,46 @@ def _optimize_threshold(prices, signals, grid=config.THRESHOLD_GRID, min_trades:
     if not np.isfinite(best_eq):
         best_eq = float(config.START_CAPITAL)
     return best_thr, float(best_eq)
+
+
+def _optimize_thresholds(prices, signals, grid=None, min_trades: int = 3, short: bool = True):
+    """Подобрать thr_hi и thr_lo совместно на OOF (для long/short стратегии).
+
+    Возвращает (thr_hi, thr_lo). thr_hi — порог входа long (sig>=thr_hi);
+    thr_lo — порог удержания/выхода (sig<thr_lo -> выход long, sig>1-thr_lo -> выход short).
+    Вход short: sig <= 1-thr_hi.
+    """
+    prices = np.asarray(prices, dtype=float)
+    signals = np.asarray(signals, dtype=float)
+    if grid is None:
+        grid = [i / 100 for i in range(30, 71)]  # 0.30..0.70
+    best_key = None
+    best = (0.55, 0.45)
+    candidates = []
+    for thr_hi in grid:
+        for thr_lo in grid:
+            if thr_lo > thr_hi:
+                continue
+            try:
+                res = BT.simulate(prices, signals, float(thr_hi),
+                                  thr_lo=float(thr_lo), short=short,
+                                  confidence_threshold=0.0)
+            except Exception:
+                continue
+            nt = int(res.get("num_trades", 0) or 0)
+            pf = res.get("profit_factor", None)
+            pf = float(pf) if pf is not None and np.isfinite(pf) else 0.0
+            candidates.append((float(thr_hi), float(thr_lo), res, nt, pf))
+            if nt < int(min_trades):
+                continue
+            key = (float(res["final_equity"]), nt, pf)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (float(thr_hi), float(thr_lo))
+    if best_key is None and candidates:
+        fb = max(candidates, key=lambda c: (c[3], c[2]["final_equity"]))
+        best = (fb[0], fb[1])
+    return best
 
 
 def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
@@ -150,10 +196,31 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
     # 2. OOF (калиброванные) для базовых.
     oof_dict = CO.generate_all_oof(zoo, tuned, Xtr, ytr, folds, calibrate_method="sigmoid")
 
+    # 2b. Глобальный thr_lo (hysteresis exit) для long/short стратегии.
+    # Если config.THR_LO задан — используем его; иначе подбираем joint на OOF soft mean.
+    if getattr(config, "THR_LO", None) is None and bool(getattr(config, "USE_SHORT", False)):
+        try:
+            _oof_arrays = [np.asarray(v, dtype=float) for v in oof_dict.values()]
+            _stacked = np.column_stack(_oof_arrays)
+            _soft = np.nanmean(_stacked, axis=1)
+            _soft = np.where(np.isfinite(_soft), _soft, np.nan)
+            _thr_hi_soft = getattr(config, "CONFIDENCE_THRESHOLD", 0.55)
+            _thr_lo_opt, _ = _optimize_thresholds(train_prices, _soft, short=True)
+            thr_lo = float(_thr_lo_opt[1]) if isinstance(_thr_lo_opt, tuple) else float(_thr_lo_opt)
+            print(f"[thr_lo] optimized on OOF soft mean: {thr_lo:.3f}")
+        except Exception as e:
+            print(f"[thr_lo] FAILED {e}")
+            thr_lo = 1.0 - float(getattr(config, "CONFIDENCE_THRESHOLD", 0.55))
+    elif getattr(config, "THR_LO", None) is None:
+        thr_lo = None
+
     # 3. Пороги для базовых моделей на OOF (полные массивы, NaN -> нет сигнала).
+    # При USE_SHORT подбираем thr_hi с учётом short и фиксированного thr_lo.
     base_thresholds = {}
     for name, oof in oof_dict.items():
-        thr, _ = _optimize_threshold(train_prices, oof)
+        thr, _ = _optimize_threshold(train_prices, oof,
+                                    thr_lo_fixed=thr_lo if thr_lo is not None else None,
+                                    short=bool(getattr(config, "USE_SHORT", False)))
         base_thresholds[name] = thr
 
     # 4. Финальные базовые модели на всём train.
@@ -213,7 +280,9 @@ def run_one_holdout(holdout: dict, df_feat: pd.DataFrame) -> dict:
 
     ens_thresholds = {}
     for name, proba in ens_oof_probas.items():
-        thr, _ = _optimize_threshold(train_prices, proba)
+        thr, _ = _optimize_threshold(train_prices, proba,
+                                    thr_lo_fixed=thr_lo if thr_lo is not None else None,
+                                    short=bool(getattr(config, "USE_SHORT", False)))
         ens_thresholds[name] = thr
 
     # Edge-параметры на OOF: средние движения на выигрышных/убыточных сделках

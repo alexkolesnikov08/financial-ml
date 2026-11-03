@@ -48,7 +48,13 @@ def main():
         r["summary"].to_csv(config.REPORTS_DIR / f"summary_{r['holdout']}.csv", index=False)
 
     # Сохраняем артефакты
-    EV.save_results({"aggregate": agg.to_dict(orient="records")}, config.REPORTS_DIR / "results.json")
+    _extra = {"aggregate": agg.to_dict(orient="records")}
+    try:
+        _extra["thresholds"] = result["per_holdout"][0].get("thresholds", {})
+        _extra["regime_analysis"] = result["per_holdout"][0].get("regime_analysis")
+    except Exception:
+        pass
+    EV.save_results(_extra, config.REPORTS_DIR / "results.json")
 
     # Графики
     try:
