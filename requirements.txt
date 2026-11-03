@@ -1,0 +1,28 @@
+# Core ML
+numpy
+pandas
+scikit-learn
+scipy
+
+# Data
+yfinance
+requests
+
+# Boosting
+xgboost
+lightgbm
+catboost
+
+# Deep learning (GPU)
+torch
+tabpackage
+
+# Tuning
+optuna
+
+# Viz
+matplotlib
+seaborn
+
+# Utils
+tqdm
