@@ -30,7 +30,9 @@ def _session():
 
 def download(ticker: str = config.TICKER,
              interval: str = config.PREFERRED_INTERVAL,
-             period: str = config.DOWNLOAD_PERIOD) -> pd.DataFrame:
+             period: str = None) -> pd.DataFrame:
+    if period is None:
+        period = period_for_timeframe(interval)
     """Скачать OHLCV через yfinance. Возвращает DataFrame с DatetimeIndex (UTC)."""
     sess = _session()
     kwargs = dict(ticker=ticker, interval=interval, period=period,

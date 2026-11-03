@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ticker", default=config.TICKER)
     parser.add_argument("--interval", default=config.TIMEFRAME)
-    parser.add_argument("--period", default=config.DOWNLOAD_PERIOD)
+    parser.add_argument("--period", default=None)
     parser.add_argument("--cross", action="store_true", help="Скачать cross-assets")
     args = parser.parse_args()
 
