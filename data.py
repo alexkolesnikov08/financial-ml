@@ -35,7 +35,7 @@ def download(ticker: str = config.TICKER,
         period = period_for_timeframe(interval)
     """Скачать OHLCV через yfinance. Возвращает DataFrame с DatetimeIndex (UTC)."""
     sess = _session()
-    kwargs = dict(ticker=ticker, interval=interval, period=period,
+    kwargs = dict(tickers=ticker, interval=interval, period=period,
                   auto_adjust=True, progress=False, threads=False)
     if sess is not None:
         kwargs["session"] = sess
